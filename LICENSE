@@ -1,0 +1,54 @@
+SOIL ANALYZER — LICENÇA DE USO GRATUITO (FREEWARE)
+Versão 1.0, outubro de 2026
+
+Copyright (c) 2026 Luiz Dione Barbosa De-Melo (De-Melo, L.D.B.)
+Instituto Federal de Educação, Ciência e Tecnologia do Rio de Janeiro (IFRJ), Brasil
+ORCID 0000-0003-2445-9943 · luiz.melo@ifrj.edu.br
+
+O Soil Analyzer (o "Programa": o instalador, o executável e o código-fonte deste repositório)
+é distribuído gratuitamente, nas condições abaixo.
+
+1. USO LIVRE E GRATUITO. Qualquer pessoa pode baixar, instalar e usar o Programa sem pagar
+   nada e sem registro, para qualquer finalidade, inclusive pessoal, acadêmica, de ensino, de
+   extensão rural e de planejamento da adubação em propriedades próprias ou de terceiros.
+
+2. REDISTRIBUIÇÃO. É permitido copiar e repassar o instalador e o código-fonte originais,
+   sem alterações e de graça, desde que esta licença e os créditos ao autor sejam mantidos.
+   É proibido vender o Programa ou cobrar pela sua distribuição.
+
+3. CÓDIGO-FONTE E MODIFICAÇÕES. O código-fonte é público para transparência, estudo e
+   conferência dos cálculos. Você pode modificá-lo para uso próprio. Distribuir versões
+   modificadas, ou incorporar o Programa em outro produto, depende de autorização escrita
+   do autor.
+
+4. COMPONENTES DE TERCEIROS. O Programa inclui bibliotecas de terceiros, cada uma sob a sua
+   própria licença (MIT, BSD, Apache-2.0, PSF, entre outras), listadas no arquivo
+   THIRD_PARTY_NOTICES.md e, no programa instalado, com o texto completo na pasta
+   "licencas". Esta licença não restringe os direitos que essas licenças garantem.
+
+5. AVISO TÉCNICO. As recomendações de calagem e adubação são sugestões técnicas calculadas a
+   partir do laudo informado e da literatura citada no README. Não substituem a avaliação
+   de um engenheiro agrônomo responsável. Confira o laudo, as áreas e a garantia dos adubos
+   antes de comprar ou aplicar.
+
+6. SEM GARANTIA. O Programa é fornecido "no estado em que se encontra", sem garantia de
+   qualquer tipo, expressa ou implícita, inclusive de adequação a uma finalidade específica.
+   Em nenhuma hipótese o autor ou o IFRJ respondem por danos, perdas de produção ou custos
+   decorrentes do uso do Programa ou das recomendações geradas por ele.
+
+7. CITAÇÃO (sugerida em trabalhos acadêmicos). De-Melo, L.D.B. Soil Analyzer: laudo de
+   análise de solo para plano de calagem e adubação. Versão 1.0. IFRJ, 2026.
+   Disponível em: https://github.com/luizdione/Soil_Analyzer
+
+-------------------------------------------------------------------------------------------
+SOIL ANALYZER — FREEWARE LICENSE (English summary; the Portuguese text above prevails)
+
+Copyright (c) 2026 Luiz Dione Barbosa De-Melo, IFRJ, Brazil.
+You may download, install and use Soil Analyzer free of charge for any purpose. You may
+redistribute the original, unmodified installer and source code free of charge, keeping
+this license and the author credits; selling it is not allowed. The source code is public
+for transparency; you may modify it for your own use, but distributing modified versions
+requires the author's written permission. Third-party components keep their own licenses
+(see THIRD_PARTY_NOTICES.md). Fertilizer recommendations are technical suggestions and do
+not replace a qualified agronomist. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND; THE AUTHOR AND IFRJ ARE NOT LIABLE FOR ANY DAMAGES ARISING FROM ITS USE.
