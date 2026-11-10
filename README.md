@@ -195,6 +195,8 @@ lado. Ele é publicado em **Releases** (não vai no repositório).
 
 **Versão para navegador** (opcional): `python tools/build_web.py --help`. Gera uma página estática
 em que o mesmo `app.py` roda no navegador (stlite); o laudo é lido no computador de quem usa.
+Com `--efemero` a página não tem histórico: abre sempre em branco, aceita o laudo ou os resultados
+digitados à mão, gera o plano e o PDF e não grava nada no navegador.
 
 ## Licença
 

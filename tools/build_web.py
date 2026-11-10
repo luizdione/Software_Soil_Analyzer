@@ -1,10 +1,12 @@
 """Gera a versão para navegador do Soil Analyzer: o mesmo app.py rodando no navegador (stlite + Pyodide).
 
 O laudo em PDF é lido e analisado no computador de quem usa (pdfplumber + pdfminer, Python puro);
-nada é enviado ao servidor, que só entrega a página. O histórico fica no IndexedDB do navegador.
+nada é enviado ao servidor, que só entrega a página. O histórico fica no IndexedDB do navegador;
+com --efemero não há histórico: a página abre sempre em branco, gera o plano e o PDF e não grava nada
+(e apaga o que versões anteriores tinham gravado no navegador).
 
 Rodar (com o Python que tem as dependências de requirements.txt):
-    python tools/build_web.py [--saida dist] [--historico PASTA] [--gate-php CAMINHO --area AREA]
+    python tools/build_web.py [--saida dist] [--historico PASTA | --efemero] [--gate-php CAMINHO --area AREA]
 
 Saída:
     index.html   página com o código (e o histórico inicial, se pedido) embutidos
@@ -81,19 +83,18 @@ PAGINA = """<!doctype html>
 <div id="root">
   <p id="aviso">Carregando o Soil Analyzer…<br>
   Na primeira visita o navegador baixa o Python e as bibliotecas (1 a 2 minutos).
-  O laudo em PDF é lido aqui mesmo, no seu computador: nada é enviado ao servidor.</p>
+  O laudo em PDF é lido aqui mesmo, no seu computador: nada é enviado ao servidor.{aviso_extra}</p>
 </div>
 <script type="application/json" id="arquivos">{arquivos}</script>
 <script type="module">
 import {{ mount }} from "https://cdn.jsdelivr.net/npm/@stlite/browser@{stlite}/build/stlite.js";
 const arquivos = JSON.parse(document.getElementById("arquivos").textContent);
 for (const f of {fontes}) arquivos["solo/fontes/" + f] = {{ url: "fontes/" + f }};
-mount({{
+{limpeza}mount({{
   entrypoint: "entrada.py",
   files: arquivos,
   requirements: {requisitos},
-  idbfsMountpoints: ["/dados"],  // o stlite faz mkdir simples: o ponto tem de ficar na raiz
-  env: {{ ANALISE_SOLO_DADOS: "/dados", ANALISE_SOLO_CACHE: "/dados/cache" }},
+{armazenamento}
   streamlitConfig: {{
     "theme.base": "light", "theme.primaryColor": "#2E5E3A",
     "client.toolbarMode": "viewer", "browser.gatherUsageStats": false,
@@ -102,6 +103,15 @@ mount({{
 </script>
 </body>
 </html>
+"""
+
+# Com histórico: a pasta /dados fica no IndexedDB do navegador (sobrevive a recarregar a página).
+ARMAZENAMENTO_HISTORICO = """  idbfsMountpoints: ["/dados"],  // o stlite faz mkdir simples: o ponto tem de ficar na raiz
+  env: {{ ANALISE_SOLO_DADOS: "/dados", ANALISE_SOLO_CACHE: "/dados/cache" }},"""
+# Sem histórico: /sessao fica só na memória da aba; recarregar ou fechar a página apaga tudo.
+ARMAZENAMENTO_EFEMERO = """  env: {{ ANALISE_SOLO_DADOS: "/sessao", ANALISE_SOLO_CACHE: "/sessao/cache", SOIL_ANALYZER_EFEMERO: "1" }},"""
+# Versões anteriores gravavam o histórico no IndexedDB "/dados" (nome = ponto de montagem do IDBFS).
+LIMPEZA_EFEMERO = """try {{ indexedDB.deleteDatabase("/dados"); }} catch (e) {{}}  // apaga o que versões com histórico gravaram
 """
 
 GATE = """<?php
@@ -172,11 +182,15 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--saida", default=str(RAIZ / "dist"), help="pasta gerada (padrão: dist/)")
     ap.add_argument("--historico", help="pasta de dados cujo historico/ vai embutido como histórico inicial")
+    ap.add_argument("--efemero", action="store_true",
+                    help="sem histórico: abre sempre em branco e não grava nada no navegador")
     ap.add_argument("--gate-php", help="caminho (a partir da raiz do site) do PHP de login que define exigirArea()")
     ap.add_argument("--area", help="área passada a exigirArea() (obrigatória com --gate-php)")
     args = ap.parse_args()
     if bool(args.gate_php) != bool(args.area):
         ap.error("--gate-php e --area vão juntos")
+    if args.efemero and args.historico:
+        ap.error("--efemero não leva histórico: tire o --historico")
     if args.gate_php and (":" in args.gate_php or not args.gate_php.startswith("/")):
         ap.error(f"--gate-php deve ser um caminho do site começando com / (recebido: {args.gate_php}); "
                  "no Git Bash, rode com MSYS_NO_PATHCONV=1 para ele não virar caminho do Windows")
@@ -186,9 +200,12 @@ def main():
     shutil.rmtree(saida, ignore_errors=True)
     (saida / "fontes").mkdir(parents=True)
     json_arqs = json.dumps(arqs, ensure_ascii=False).replace("</", "<\\/")  # não fechar o <script>
-    (saida / "index.html").write_text(PAGINA.format(stlite=STLITE, arquivos=json_arqs,
-                                                    fontes=json.dumps(NOMES_FONTES),
-                                                    requisitos=json.dumps(REQUISITOS)), encoding="utf-8")
+    armazenamento = (ARMAZENAMENTO_EFEMERO if args.efemero else ARMAZENAMENTO_HISTORICO).format()
+    (saida / "index.html").write_text(PAGINA.format(
+        stlite=STLITE, arquivos=json_arqs, fontes=json.dumps(NOMES_FONTES), requisitos=json.dumps(REQUISITOS),
+        armazenamento=armazenamento, limpeza=LIMPEZA_EFEMERO.format() if args.efemero else "",
+        aviso_extra="<br>Nada fica guardado: ao recarregar a página, tudo volta em branco." if args.efemero else ""),
+        encoding="utf-8")
     if args.gate_php:
         (saida / "index.php").write_text(GATE.format(gate=args.gate_php, area=args.area), encoding="utf-8")
     (saida / ".htaccess").write_text(HTACCESS.format(gate_regras=GATE_REGRAS if args.gate_php else "", csp=CSP),
@@ -197,8 +214,10 @@ def main():
         shutil.copy(FONTES / f, saida / "fontes" / f)
 
     semente = sorted(k for k in arqs if k.startswith("semente/"))
-    print(f"{saida} gerado: {len(arqs) - len(semente)} arquivos de código; histórico inicial: "
-          f"{', '.join(Path(s).name for s in semente) or 'nenhum'}; login: {args.gate_php or 'sem'}")
+    print(f"{saida} gerado: {len(arqs) - len(semente)} arquivos de código; "
+          + ("sem histórico (nada é gravado no navegador)" if args.efemero else
+             f"histórico inicial: {', '.join(Path(s).name for s in semente) or 'nenhum'}")
+          + f"; login: {args.gate_php or 'sem'}")
     for p in sorted(saida.rglob("*")):
         if p.is_file():
             print(f"  {p.relative_to(saida)}  {p.stat().st_size / 1024:.0f} KB")

@@ -2,11 +2,14 @@
 
 Rodar:  programa instalado (Soil_Analyzer.exe), abrir_dashboard.bat ou python -m streamlit run app.py
 Dados:  pasta em ANALISE_SOLO_DADOS (padrão: Documentos\\Soil Analyzer)
+Com SOIL_ANALYZER_EFEMERO=1 (versão online aberta) não há histórico: a tela começa em branco, gera o
+plano e o PDF e nada fica guardado.
 """
 from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from datetime import date
 from pathlib import Path
 
@@ -17,21 +20,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from solo import NOME, __version__  # noqa: E402
 from solo.exportar import gerar_pdf, gerar_xlsx  # noqa: E402
 from solo.historico import Historico, comparar, meses_entre  # noqa: E402
-from solo.leitor import ROTULOS, ModeloColunas, ler_laudo, reaplicar, registrar_correcoes  # noqa: E402
+from solo.leitor import (ROTULOS, ModeloColunas, ler_laudo, montar_digitado, reaplicar,  # noqa: E402
+                         registrar_correcoes)
 from solo.motor import recomendar  # noqa: E402
 from solo.regras import (BORAX, CULTURA_POR_ROTULO, CULTURAS, KCL, NIVEIS, NPK, P2O5_FOSFATADO_PADRAO, ROT,  # noqa: E402
                          SSP, br, br_kg)
 
-PASTA = Path(os.environ.get("ANALISE_SOLO_DADOS") or Path.home() / "Documents" / NOME)
+EFEMERO = os.environ.get("SOIL_ANALYZER_EFEMERO") == "1"
+PASTA = Path(os.environ.get("ANALISE_SOLO_DADOS")
+             or (Path(tempfile.gettempdir()) / "soil_analyzer_sessao" if EFEMERO else Path.home() / "Documents" / NOME))
 NO_NAVEGADOR = sys.platform == "emscripten"  # versão online: Python no navegador (stlite/Pyodide)
 CORES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
 CAMPO_POR_ROTULO = {v: k for k, v in ROTULOS.items()}
+BORO = "Boro (folhas novas deformadas)"
+# tabela "Digitar os resultados" (versão sem histórico): coluna na tela -> campo do leitor de laudo
+COLS_DIGITAR = {"Talhão": "sigla", "P (mg/dm³)": "P", "K (mg/dm³)": "K_mg", "pH em água": "pH_agua", "V%": "V",
+                "CTC a pH 7 (T)": "T", "Ca (cmolc/dm³)": "Ca", "Mg (cmolc/dm³)": "Mg", "H+Al (cmolc/dm³)": "H_Al",
+                "M.O. (g/kg)": "MO_g_kg"}
 
 st.set_page_config(page_title=f"{NOME} · solo → adubação", page_icon="🌱", layout="wide")
 hist = Historico(PASTA)
 
 
-@st.cache_resource(show_spinner="Preparando o reconhecedor de colunas (só na primeira vez)...")
+@st.cache_resource(show_spinner="Preparando o reconhecedor de colunas do laudo...")
 def carregar_modelo(_versao_aprendizado: float) -> ModeloColunas:
     return ModeloColunas(hist.arq_aprendizado, hist.arq_modelo)
 
@@ -67,23 +78,61 @@ with st.sidebar:
             BORAX: st.number_input("Bórax (pacote 1 kg)", 0.0, step=1.0),
         }
         precos = {k: v for k, v in precos.items() if v}
-    n_laudos = hist.analises()["laudo_id"].nunique()
-    onde = "guardados neste navegador" if NO_NAVEGADOR else f"em `{PASTA}`"
-    st.caption(f"Histórico: {n_laudos} laudo(s), {len(hist.talhoes())} talhão(ões).  \nDados {onde}")
-    with st.expander("Cópia do histórico (.zip)"):
-        st.caption("Guarde uma cópia de segurança ou leve o histórico para outro computador: baixe aqui e "
-                   "carregue no outro lado. Carregar substitui o histórico atual.")
-        st.download_button("⬇️ Baixar histórico", hist.exportar_zip(), f"historico_solo_{date.today()}.zip",
-                           "application/zip", width="stretch")
-        zip_up = st.file_uploader("Carregar histórico", type=["zip"], key="zip_historico")
-        if zip_up and st.button("Substituir o histórico por este arquivo", width="stretch"):
-            try:
-                hist.importar_zip(zip_up.getvalue())
-                st.session_state.pop("arquivo", None)
-                st.rerun()
-            except ValueError as e:
-                st.error(str(e))
+    if EFEMERO:
+        st.caption("Nada fica guardado: ao recarregar ou fechar a página, tudo volta em branco. "
+                   "Baixe o PDF antes de sair.")
+    else:
+        n_laudos = hist.analises()["laudo_id"].nunique()
+        onde = "guardados neste navegador" if NO_NAVEGADOR else f"em `{PASTA}`"
+        st.caption(f"Histórico: {n_laudos} laudo(s), {len(hist.talhoes())} talhão(ões).  \nDados {onde}")
+        with st.expander("Cópia do histórico (.zip)"):
+            st.caption("Guarde uma cópia de segurança ou leve o histórico para outro computador: baixe aqui e "
+                       "carregue no outro lado. Carregar substitui o histórico atual.")
+            st.download_button("⬇️ Baixar histórico", hist.exportar_zip(), f"historico_solo_{date.today()}.zip",
+                               "application/zip", width="stretch")
+            zip_up = st.file_uploader("Carregar histórico", type=["zip"], key="zip_historico")
+            if zip_up and st.button("Substituir o histórico por este arquivo", width="stretch"):
+                try:
+                    hist.importar_zip(zip_up.getvalue())
+                    st.session_state.pop("arquivo", None)
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
     st.caption(f"{NOME} {__version__} · freeware · sugestão técnica: valide as doses com um engenheiro agrônomo.")
+
+
+# ---------------------------------------------------------------- tabelas editáveis
+def _num(v, padrao: float = 0.0) -> float:
+    """Célula do st.data_editor como número: vazio, None ou NaN viram o padrão."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return padrao
+    return padrao if v != v else v
+
+
+def config_talhoes(cultura_obrigatoria: bool = True) -> dict:
+    return {
+        "Cultura": st.column_config.SelectboxColumn(options=list(CULTURAS.values()), required=cultura_obrigatoria),
+        "Área (m²)": st.column_config.NumberColumn(min_value=0, step=100, format="%d"),
+        "Coqueiros": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
+        "Idade coqueiros": st.column_config.NumberColumn(min_value=1, max_value=80, step=1, format="%d anos",
+                                                         help="Em branco: coqueiro adulto (7 anos)."),
+    }
+
+
+def talhao_da_linha(r: dict, desde=None) -> dict:
+    """Linha da tabela de talhões -> cadastro usado por recomendar()."""
+    boro = r.get(BORO)
+    return {"cultura": CULTURA_POR_ROTULO.get(r.get("Cultura")), "area_m2": _num(r.get("Área (m²)")),
+            "coqueiros_n": int(_num(r.get("Coqueiros"))), "coqueiros_idade": int(_num(r.get("Idade coqueiros"), 7)),
+            "coqueiros_boro": bool(boro) and boro == boro, "desde": desde}
+
+
+def talhoes_em_branco(n: int) -> dict:
+    """Colunas de cultura, área e coqueiros sem nada preenchido (versão sem histórico)."""
+    return {"Cultura": pd.Series([None] * n, dtype="object"), "Área (m²)": pd.Series([None] * n, dtype="float64"),
+            "Coqueiros": [0] * n, "Idade coqueiros": pd.Series([None] * n, dtype="float64"), BORO: [False] * n}
 
 
 # ---------------------------------------------------------------- blocos de exibição
@@ -106,7 +155,8 @@ def tabela_plano(plano: pd.DataFrame) -> pd.DataFrame:
     return t
 
 
-def mostrar_resultado(res: dict, laudo: pd.DataFrame, comparacao: pd.DataFrame, alertas_hist: list, chave: str):
+def mostrar_resultado(res: dict, laudo: pd.DataFrame, comparacao: pd.DataFrame, alertas_hist: list, chave: str,
+                      titulo: str = ""):
     st.subheader(f"O que comprar · safra {res['safra']}/{str(res['safra'] + 1)[-2:]}")
     compras = res["compras"]
     if compras.empty:
@@ -152,8 +202,8 @@ def mostrar_resultado(res: dict, laudo: pd.DataFrame, comparacao: pd.DataFrame, 
         st.warning(a, icon="⚠️")
 
     d1, d2 = st.columns(2)
-    sufixo = f"{res['safra']}_{chave}"
-    d1.download_button("📄 Baixar relatório (PDF)", gerar_pdf(res, laudo, comparacao, alertas_hist),
+    sufixo = str(res["safra"]) if chave == "avulso" else f"{res['safra']}_{chave}"
+    d1.download_button("📄 Baixar relatório (PDF)", gerar_pdf(res, laudo, comparacao, alertas_hist, titulo),
                        f"plano_adubacao_{sufixo}.pdf", "application/pdf", width="stretch", key=f"pdf_{chave}")
     d2.download_button("📊 Baixar planilha (Excel)", gerar_xlsx(res, laudo, comparacao, alertas_hist),
                        f"plano_adubacao_{sufixo}.xlsx", width="stretch", key=f"xlsx_{chave}",
@@ -208,7 +258,145 @@ def grafico_evolucao(df: pd.DataFrame, siglas: list):
     st.plotly_chart(fig, width="stretch")
 
 
-# ---------------------------------------------------------------- abas
+# ---------------------------------------------------------------- leitura do laudo
+def ler_arquivo(arq, explicacao: str):
+    """Lê o laudo enviado (uma vez por arquivo) e mostra a leitura para conferir e corrigir as colunas."""
+    chave_arq = f"{arq.name}_{arq.size}"
+    if st.session_state.get("arquivo") != chave_arq:
+        try:
+            st.session_state.leitura = ler_laudo(arq.getvalue(), arq.name, modelo())
+            st.session_state.arquivo = chave_arq
+        except Exception as e:  # arquivo sem tabela legível
+            st.error(f"Não consegui ler o arquivo: {e}")
+            st.stop()
+    lei = st.session_state.leitura
+
+    c1, c2 = st.columns(2)
+    data_ini = date.fromisoformat(lei.meta["data_laudo"]) if lei.meta.get("data_laudo") else date.today()
+    data_laudo = c1.date_input("Data do laudo", data_ini, format="DD/MM/YYYY").isoformat()
+    laboratorio = c2.text_input("Laboratório", lei.meta.get("laboratorio", ""))
+
+    conf = lei.colunas.loc[lei.colunas["campo"] != "ignorar", "confianca"]
+    with st.expander(f"Como o arquivo foi lido: {len(conf)} colunas reconhecidas por ML "
+                     f"(confiança média {br(100 * conf.mean())}%)", expanded=bool((conf < 0.5).any())):
+        st.caption(explicacao)
+        editado = st.data_editor(
+            lei.colunas.assign(campo=lei.colunas["campo"].map(ROTULOS))[["cabecalho", "campo", "confianca",
+                                                                        "exemplo"]],
+            column_config={
+                "cabecalho": st.column_config.TextColumn("Cabeçalho no arquivo"),
+                "campo": st.column_config.SelectboxColumn("Reconhecido como", options=list(ROTULOS.values()),
+                                                          required=True),
+                "confianca": st.column_config.ProgressColumn("Confiança", min_value=0, max_value=1,
+                                                             format="percent"),
+                "exemplo": st.column_config.TextColumn("Primeiros valores"),
+            },
+            disabled=["cabecalho", "confianca", "exemplo"], hide_index=True, width="stretch",
+            key=f"mapa_{chave_arq}")
+        mapa = {i: CAMPO_POR_ROTULO[r] for i, r in enumerate(editado["campo"])}
+        if mapa != dict(enumerate(lei.colunas["campo"])):
+            lei = reaplicar(lei, mapa)
+            st.session_state.leitura = lei
+            st.session_state.mapa_corrigido = True
+    for a in lei.avisos:
+        st.warning(a)
+    st.dataframe(lei.dados, hide_index=True, width="stretch")
+    return lei, chave_arq, data_laudo, laboratorio
+
+
+# ---------------------------------------------------------------- versão sem histórico (online aberta)
+def digitar_resultados() -> pd.DataFrame:
+    """Tabela em branco com uma linha por talhão; mudar o número de linhas mantém o que já foi digitado."""
+    n = int(st.number_input("Quantos talhões (áreas com análise de solo)?", min_value=1, max_value=30, value=1))
+    if st.session_state.get("dig_n") != n:
+        base = pd.DataFrame({"Talhão": pd.Series([None] * n, dtype="object"), **talhoes_em_branco(n)})
+        for c in list(COLS_DIGITAR)[1:]:
+            base[c] = pd.Series([None] * n, dtype="float64")
+        base = base[["Talhão", "Cultura", "Área (m²)", *list(COLS_DIGITAR)[1:], "Coqueiros", "Idade coqueiros", BORO]]
+        ant = st.session_state.get("dig_ultimo")
+        if ant is not None:
+            m = min(n, len(ant))
+            for c in base.columns:
+                base.loc[:m - 1, c] = ant[c].iloc[:m].to_numpy()
+        st.session_state.dig_base, st.session_state.dig_n = base, n
+        st.session_state.dig_versao = st.session_state.get("dig_versao", 0) + 1
+    NC = st.column_config.NumberColumn
+    ed = st.data_editor(st.session_state.dig_base, column_config={
+        "Talhão": st.column_config.TextColumn(help="Nome do talhão ou da amostra (ex.: Pasto de cima)."),
+        **config_talhoes(cultura_obrigatoria=False),
+        "P (mg/dm³)": NC(min_value=0.0, step=0.1, help="Fósforo (P Mehlich-1) do laudo."),
+        "K (mg/dm³)": NC(min_value=0.0, step=1.0, help="Potássio em mg/dm³. Se o laudo der em cmolc/dm³, "
+                                                       "multiplique por 391."),
+        "pH em água": NC(min_value=3.0, max_value=9.0, step=0.1),
+        "V%": NC(min_value=0.0, max_value=100.0, step=1.0, help="Saturação por bases. Se o laudo não trouxer, "
+                                                                 "preencha Ca, Mg e H+Al: o programa calcula."),
+        "CTC a pH 7 (T)": NC(min_value=0.0, step=0.01, help="cmolc/dm³. Se o laudo não trouxer, preencha Ca, "
+                                                            "Mg e H+Al: o programa calcula."),
+        "Ca (cmolc/dm³)": NC(min_value=0.0, step=0.01), "Mg (cmolc/dm³)": NC(min_value=0.0, step=0.01),
+        "H+Al (cmolc/dm³)": NC(min_value=0.0, step=0.01), "M.O. (g/kg)": NC(min_value=0.0, step=1.0),
+    }, hide_index=True, width="stretch", key=f"digitado_{st.session_state.dig_versao}")
+    st.session_state.dig_ultimo = ed
+    return ed
+
+
+def tela_avulsa():
+    """Começa em branco: análise (laudo ou digitada), cultura e área -> plano e PDF. Nada é gravado."""
+    st.markdown("#### Plano de calagem e adubação a partir da análise de solo")
+    st.caption("Informe a análise de solo, a cultura e a área de cada talhão e baixe o relatório em PDF. "
+               "Nada fica guardado: ao recarregar ou fechar a página, tudo volta em branco.")
+    propriedade = st.text_input("Propriedade ou cliente (opcional, sai no cabeçalho do PDF)").strip()
+    modo = st.radio("Como informar a análise de solo", ["Enviar o laudo (PDF, XLSX ou CSV)", "Digitar os resultados"],
+                    horizontal=True)
+    avisos = []
+    if modo.startswith("Enviar"):
+        arq = st.file_uploader("Laudo de análise de solo", type=["pdf", "xlsx", "xls", "csv"])
+        if not arq:
+            if NO_NAVEGADOR:
+                st.caption("O arquivo é lido aqui mesmo, no seu computador: nada é enviado ao servidor.")
+            return
+        lei, chave_arq, data_laudo, _ = ler_arquivo(arq, "Se alguma coluna estiver errada, troque o campo.")
+        st.markdown("#### Cultura e área de cada talhão")
+        tal_ed = st.data_editor(
+            pd.DataFrame({"Sigla no laudo": list(lei.dados["sigla"]), **talhoes_em_branco(len(lei.dados))}),
+            column_config=config_talhoes(cultura_obrigatoria=False), disabled=["Sigla no laudo"], hide_index=True,
+            width="stretch", key=f"tal_{chave_arq}")
+        talhoes_ui = {r["Sigla no laudo"]: talhao_da_linha(r, data_laudo) for r in tal_ed.to_dict("records")}
+        atual = lei.dados.assign(data_laudo=data_laudo)
+    else:
+        data_laudo = st.date_input("Data da análise (do laudo)", date.today(), format="DD/MM/YYYY").isoformat()
+        st.caption("Uma linha por talhão. Para o adubo bastam P e K; para a calagem, V% e CTC (T), ou Ca, Mg e "
+                   "H+Al. Coqueiros: número de pés no talhão (0 se não houver).")
+        ed = digitar_resultados()
+        colunas = ["Talhão", "Cultura", "Área (m²)", *list(COLS_DIGITAR)[1:]]
+        cheia = ed[colunas].apply(lambda r: any(v not in (None, "") and v == v for v in r), axis=1)
+        if not cheia.any():
+            return
+        ed = ed[cheia].reset_index(drop=True)
+        dados, avisos = montar_digitado(ed.rename(columns=COLS_DIGITAR))
+        talhoes_ui = {s: talhao_da_linha(r, data_laudo) for s, r in zip(dados["sigla"], ed.to_dict("records"))}
+        atual = dados.assign(data_laudo=data_laudo)
+
+    prontos = [s for s, t in talhoes_ui.items() if t["cultura"] and t["area_m2"] > 0]
+    faltam = [s for s in talhoes_ui if s not in prontos]
+    for a in avisos:  # avisos da tabela digitada começam por "<talhão>:"; só dos talhões que entram no plano
+        if any(a.startswith(f"{s}:") for s in prontos):
+            st.warning(a)
+    if faltam:
+        st.info("Escolha a cultura e informe a área de: " + ", ".join(faltam)
+                + (". Até lá esses talhões ficam fora do plano." if prontos else "."))
+    if not prontos:
+        return
+    atual = atual[atual["sigla"].isin(prontos)].reset_index(drop=True)
+    res = recomendar(atual, {s: talhoes_ui[s] for s in prontos}, nivel, prnt, so_kcl, precos, p2o5_pct=p2o5_pct)
+    st.divider()
+    mostrar_resultado(res, atual, pd.DataFrame(), [], "avulso", titulo=propriedade)
+
+
+if EFEMERO:
+    tela_avulsa()
+    st.stop()
+
+# ---------------------------------------------------------------- abas (programa com histórico)
 aba_nova, aba_fazenda, aba_hist = st.tabs(["📄 Nova análise", "🗺️ Fazenda (recompor tudo)", "📈 Histórico"])
 
 with aba_nova:
@@ -216,47 +404,9 @@ with aba_nova:
                 "As colunas são reconhecidas automaticamente; confira, informe as áreas e veja o plano.")
     arq = st.file_uploader("Laudo de análise de solo", type=["pdf", "xlsx", "xls", "csv"])
     if arq:
-        chave_arq = f"{arq.name}_{arq.size}"
-        if st.session_state.get("arquivo") != chave_arq:
-            try:
-                st.session_state.leitura = ler_laudo(arq.getvalue(), arq.name, modelo())
-                st.session_state.arquivo = chave_arq
-            except Exception as e:  # arquivo sem tabela legível
-                st.error(f"Não consegui ler o arquivo: {e}")
-                st.stop()
-        lei = st.session_state.leitura
-
-        c1, c2 = st.columns(2)
-        data_ini = date.fromisoformat(lei.meta["data_laudo"]) if lei.meta.get("data_laudo") else date.today()
-        data_laudo = c1.date_input("Data do laudo", data_ini, format="DD/MM/YYYY").isoformat()
-        laboratorio = c2.text_input("Laboratório", lei.meta.get("laboratorio", ""))
-
-        conf = lei.colunas.loc[lei.colunas["campo"] != "ignorar", "confianca"]
-        with st.expander(f"Como o arquivo foi lido: {len(conf)} colunas reconhecidas por ML "
-                         f"(confiança média {br(100 * conf.mean())}%)", expanded=bool((conf < 0.5).any())):
-            st.caption("Se alguma coluna estiver errada, troque o campo. Ao salvar no histórico, a correção "
-                       "vira exemplo de treino e o reconhecedor aprende o formato desse laboratório.")
-            editado = st.data_editor(
-                lei.colunas.assign(campo=lei.colunas["campo"].map(ROTULOS))[["cabecalho", "campo", "confianca",
-                                                                            "exemplo"]],
-                column_config={
-                    "cabecalho": st.column_config.TextColumn("Cabeçalho no arquivo"),
-                    "campo": st.column_config.SelectboxColumn("Reconhecido como", options=list(ROTULOS.values()),
-                                                              required=True),
-                    "confianca": st.column_config.ProgressColumn("Confiança", min_value=0, max_value=1,
-                                                                 format="percent"),
-                    "exemplo": st.column_config.TextColumn("Primeiros valores"),
-                },
-                disabled=["cabecalho", "confianca", "exemplo"], hide_index=True, width="stretch",
-                key=f"mapa_{chave_arq}")
-            mapa = {i: CAMPO_POR_ROTULO[r] for i, r in enumerate(editado["campo"])}
-            if mapa != dict(enumerate(lei.colunas["campo"])):
-                lei = reaplicar(lei, mapa)
-                st.session_state.leitura = lei
-                st.session_state.mapa_corrigido = True
-        for a in lei.avisos:
-            st.warning(a)
-        st.dataframe(lei.dados, hide_index=True, width="stretch")
+        lei, chave_arq, data_laudo, laboratorio = ler_arquivo(
+            arq, "Se alguma coluna estiver errada, troque o campo. Ao salvar no histórico, a correção vira exemplo "
+                 "de treino e o reconhecedor aprende o formato desse laboratório.")
 
         st.markdown("#### Talhões deste laudo")
         casam = hist.casar(list(lei.dados["sigla"]))
@@ -275,24 +425,18 @@ with aba_nova:
                            "Boro (folhas novas deformadas)": bool(t.get("coqueiros_boro", True))})
         st.caption("Siglas já analisadas trazem área e cultura do cadastro. Em \"Usar como\", troque para juntar uma "
                    "grafia diferente (ex.: A-12) ao histórico da sigla certa.")
-        tal_ed = st.data_editor(pd.DataFrame(linhas), column_config={
-            "Cultura": st.column_config.SelectboxColumn(options=list(CULTURAS.values()), required=True),
-            "Área (m²)": st.column_config.NumberColumn(min_value=0, step=100, format="%d"),
-            "Coqueiros": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
-            "Idade coqueiros": st.column_config.NumberColumn(min_value=1, max_value=80, step=1, format="%d anos"),
-        }, disabled=["Sigla no laudo", "Situação"], hide_index=True, width="stretch", key=f"tal_{chave_arq}")
+        tal_ed = st.data_editor(pd.DataFrame(linhas), column_config=config_talhoes(),
+                                disabled=["Sigla no laudo", "Situação"], hide_index=True, width="stretch",
+                                key=f"tal_{chave_arq}")
 
         renomear = dict(zip(tal_ed["Sigla no laudo"], tal_ed["Usar como"].fillna(tal_ed["Sigla no laudo"])))
         atual = lei.dados.assign(sigla=lei.dados["sigla"].map(renomear), data_laudo=data_laudo)
         talhoes_ui = {}
         for r in tal_ed.to_dict("records"):
-            cult = CULTURA_POR_ROTULO[r["Cultura"]]
             antigo = talh.get(r["Usar como"], {})
-            talhoes_ui[r["Usar como"]] = {
-                "cultura": cult, "area_m2": float(r["Área (m²)"] or 0), "coqueiros_n": int(r["Coqueiros"] or 0),
-                "coqueiros_idade": int(r["Idade coqueiros"] or 7),
-                "coqueiros_boro": bool(r["Boro (folhas novas deformadas)"]),
-                "desde": antigo.get("desde") if antigo.get("cultura") == cult else data_laudo}
+            t = talhao_da_linha(r)
+            t["desde"] = antigo.get("desde") if antigo.get("cultura") == t["cultura"] else data_laudo
+            talhoes_ui[r["Usar como"]] = t
 
         res = recomendar(atual, talhoes_ui, nivel, prnt, so_kcl, precos, p2o5_pct=p2o5_pct)
         comparacao, alertas_hist = comparar_com_historico(atual)
@@ -324,17 +468,10 @@ with aba_fazenda:
             "Idade coqueiros": int(talh.get(s, {}).get("coqueiros_idade") or 7),
             "Boro (folhas novas deformadas)": bool(talh.get(s, {}).get("coqueiros_boro", True)),
         } for s, d in zip(atuais["sigla"], atuais["data_laudo"])])
-        cad_ed = st.data_editor(cad, column_config={
-            "Cultura": st.column_config.SelectboxColumn(options=list(CULTURAS.values()), required=True),
-            "Área (m²)": st.column_config.NumberColumn(min_value=0, step=100, format="%d"),
-            "Coqueiros": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
-            "Idade coqueiros": st.column_config.NumberColumn(min_value=1, max_value=80, step=1, format="%d anos"),
-        }, disabled=["Sigla", "Laudo de", "Meses"], hide_index=True, width="stretch", key="cadastro")
-        talhoes_ed = {r["Sigla"]: {
-            "cultura": CULTURA_POR_ROTULO[r["Cultura"]], "area_m2": float(r["Área (m²)"] or 0),
-            "coqueiros_n": int(r["Coqueiros"] or 0), "coqueiros_idade": int(r["Idade coqueiros"] or 7),
-            "coqueiros_boro": bool(r["Boro (folhas novas deformadas)"]),
-            "desde": talh.get(r["Sigla"], {}).get("desde")} for r in cad_ed.to_dict("records")}
+        cad_ed = st.data_editor(cad, column_config=config_talhoes(), disabled=["Sigla", "Laudo de", "Meses"],
+                                hide_index=True, width="stretch", key="cadastro")
+        talhoes_ed = {r["Sigla"]: talhao_da_linha(r, talh.get(r["Sigla"], {}).get("desde"))
+                      for r in cad_ed.to_dict("records")}
         if st.button("💾 Salvar cadastro dos talhões"):
             hist.salvar_talhoes(talhoes_ed)
             st.success("Cadastro salvo.")

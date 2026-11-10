@@ -442,6 +442,33 @@ def reaplicar(leitura: Leitura, mapa: dict[int, str]) -> Leitura:
     return Leitura(dados, colunas, leitura.meta, avisos, leitura.cabecalhos, leitura.valores)
 
 
+def montar_digitado(tabela: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """Resultados digitados à mão (colunas com nomes de CAMPOS) no mesmo formato do leitor de laudo.
+
+    A sigla fica como foi escrita ("Pasto de cima"), sem a normalização das siglas de laboratório.
+    Completa linha a linha o que dá para calcular: K em cmolc, SB, T e V%.
+    """
+    campos = [c for c in tabela.columns if c in CAMPOS and c != "ignorar"]
+    df, _ = _montar(campos, [tabela[c].tolist() for c in campos], dict(enumerate(campos)))
+    nomes = [str(v).strip() if isinstance(v, str) else "" for v in tabela.get("sigla", [""] * len(df))]
+    vistos, siglas = set(), []
+    for i, nome in enumerate(nomes):
+        nome = nome or f"Talhão {i + 1}"
+        base, k = nome, 2
+        while nome in vistos:  # o plano usa a sigla como chave: nomes repetidos ganham (2), (3)...
+            nome, k = f"{base} ({k})", k + 1
+        vistos.add(nome)
+        siglas.append(nome)
+    df["sigla"] = siglas
+    df["K_cmolc"] = df["K_cmolc"].fillna((df["K_mg"] / 391).round(3))
+    df["SB"] = df["SB"].fillna((df["Ca"] + df["Mg"] + df["K_cmolc"] + df["Na"].fillna(0)).round(2))
+    df["T"] = df["T"].fillna((df["SB"] + df["H_Al"]).round(2))
+    df["V"] = df["V"].fillna((100 * df["SB"] / df["T"]).round(0))
+    avisos = [f"{s}: sem V% e CTC (T), nem Ca, Mg e H+Al para calculá-los; a calagem não foi avaliada."
+              for s, v, t in zip(df["sigla"], df["V"], df["T"]) if pd.isna(v) or pd.isna(t)]
+    return df, avisos
+
+
 def ler_laudo(conteudo: bytes, nome: str, modelo: ModeloColunas) -> Leitura:
     if nome.lower().endswith(".pdf"):
         linhas, texto = _linhas_pdf(conteudo)
